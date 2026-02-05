@@ -34,6 +34,9 @@ class StudentUiModel {
   final String? photoUrl;
   final String? courseLabel;
 
+  // ✅ جديد: المبلغ المدفوع
+  final num paidAmount;
+
   StudentUiModel({
     required this.id,
     required this.fullName,
@@ -41,6 +44,7 @@ class StudentUiModel {
     this.barcodeValue,
     this.photoUrl,
     this.courseLabel,
+    required this.paidAmount,
   });
 }
 
@@ -181,13 +185,35 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     _isProcessingScan = false;
   }
 
+  // ✅ جديد: هات المبلغ المدفوع من enrollments
+  Future<num> _getPaidAmount({
+    required String studentId,
+    required String offeringId,
+  }) async {
+    try {
+      final res = await supabase
+          .from('enrollments')
+          .select('paid_amount')
+          .eq('student_id', studentId)
+          .eq('course_offering_id', offeringId)
+          .maybeSingle();
+
+      if (res == null) return 0;
+
+      final v = res['paid_amount'];
+      if (v is num) return v;
+      return num.tryParse(v.toString()) ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   Future<void> _handleBarcode(String code) async {
     if (_sessionId == null) {
       _toast('لازم تضغط "فتح جلسة اليوم" الأول');
       return;
     }
 
-    // ✅ لو الكارت ظاهر، ممنوع أي سكان جديد لحد ما تقفله
     if (_isCardVisible) return;
 
     final now = DateTime.now();
@@ -196,9 +222,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     }
     _lastScanAt = now;
 
-    if (_lastBarcode != null && _lastBarcode == code) {
-      return;
-    }
+    if (_lastBarcode != null && _lastBarcode == code) return;
 
     if (_isProcessingScan) return;
     _isProcessingScan = true;
@@ -208,10 +232,8 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     });
 
     try {
-      // ✅ وقف الكاميرا عشان مانسكانش تاني قبل ما المستخدم يقفل الكارت
       await _scannerController.stop();
 
-      // 1) هات بيانات الطالب الأول
       final studentRes = await supabase
           .from('students')
           .select('id, full_name, barcode_value, photo_url, churches(name)')
@@ -221,14 +243,12 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       if (studentRes == null) {
         await _hapticAndTick();
         _toast('الـ QR ده مش متسجل');
-
-        // ✅ رجّع الكاميرا تشتغل تاني فورًا
         await _scannerController.start();
         _isProcessingScan = false;
         return;
       }
 
-      // 2) سجل حضور
+      // ✅ سجل حضور
       await supabase.rpc('mark_present', params: {
         'p_session_id': _sessionId,
         'p_barcode': code,
@@ -236,13 +256,22 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
 
       await _hapticAndTick();
 
+      final studentId = studentRes['id'] as String;
+
+      // ✅ هات المدفوع
+      final paidAmount = await _getPaidAmount(
+        studentId: studentId,
+        offeringId: _selectedOffering!.id,
+      );
+
       final student = StudentUiModel(
-        id: studentRes['id'] as String,
+        id: studentId,
         fullName: (studentRes['full_name'] ?? '').toString(),
         barcodeValue: (studentRes['barcode_value'] ?? '').toString(),
         photoUrl: (studentRes['photo_url'] ?? '').toString(),
         churchName: (studentRes['churches']?['name'] ?? '').toString(),
         courseLabel: _selectedOffering?.label,
+        paidAmount: paidAmount,
       );
 
       _lastBarcode = code;
@@ -251,11 +280,8 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       setState(() {
         _scannedStudent = student;
         _showSuccess = true;
-        _isCardVisible = true; // ✅ Pop overlay
+        _isCardVisible = true;
       });
-
-      // ملاحظة: مش هنقفل الكارت لوحده… انت قلت تقفله “لما ادوس عليه”
-      // فهنسيبه مفتوح لحد ما المستخدم يلمسه.
     } catch (e) {
       _toast('فشل تسجيل الحضور: $e');
       _isProcessingScan = false;
@@ -285,7 +311,6 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
 
             return Stack(
               children: [
-                // ✅ الصفحة الأساسية
                 SingleChildScrollView(
                   child: Padding(
                     padding: const EdgeInsets.all(20),
@@ -300,24 +325,20 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                         _buildOpenSessionButton(),
                         const SizedBox(height: 18),
                         _buildScanArea(size: scanBox),
-                        const SizedBox(height: 120), // مساحة عشان الـ popup مايغطّيش آخر حاجة
+                        const SizedBox(height: 120),
                       ],
                     ),
                   ),
                 ),
 
-                // ✅ Overlay dim خلف الكارت
                 if (_isCardVisible)
                   Positioned.fill(
                     child: GestureDetector(
-                      onTap: _dismissCardAndResume, // لو دوست برا الكارت كمان يقفل
-                      child: Container(
-                        color: Colors.black.withOpacity(0.35),
-                      ),
+                      onTap: _dismissCardAndResume,
+                      child: Container(color: Colors.black.withOpacity(0.35)),
                     ),
                   ),
 
-                // ✅ Pop Card فوق كل شيء (Z-index)
                 Positioned(
                   left: 16,
                   right: 16,
@@ -335,7 +356,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                     child: _isCardVisible && _scannedStudent != null
                         ? GestureDetector(
                       key: const ValueKey('student_card'),
-                      onTap: _dismissCardAndResume, // ✅ تقفل لما تدوس عليها
+                      onTap: _dismissCardAndResume,
                       child: _buildStudentCard(_scannedStudent!),
                     )
                         : const SizedBox.shrink(key: ValueKey('empty')),
@@ -392,9 +413,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 2))
-        ],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 2))],
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -413,10 +432,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
               items: _offerings.map((o) {
                 return DropdownMenuItem<CourseOfferingItem>(
                   value: o,
-                  child: SizedBox(
-                    width: 190,
-                    child: Text(o.label, overflow: TextOverflow.ellipsis),
-                  ),
+                  child: SizedBox(width: 190, child: Text(o.label, overflow: TextOverflow.ellipsis)),
                 );
               }).toList(),
               onChanged: (val) async {
@@ -491,9 +507,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(28),
-          boxShadow: [
-            BoxShadow(color: const Color(0xFF1A3C5E).withOpacity(0.15), blurRadius: 24, offset: const Offset(0, 8)),
-          ],
+          boxShadow: [BoxShadow(color: const Color(0xFF1A3C5E).withOpacity(0.15), blurRadius: 24, offset: const Offset(0, 8))],
           border: Border.all(color: const Color(0xFF1A3C5E).withOpacity(0.12), width: 2),
         ),
         child: ClipRRect(
@@ -507,7 +521,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                   fit: BoxFit.cover,
                   onDetect: (capture) {
                     if (!cameraActive) return;
-                    if (_isCardVisible) return; // ✅ لو الكارت ظاهر تجاهل أي Detect
+                    if (_isCardVisible) return;
                     final barcodes = capture.barcodes;
                     if (barcodes.isEmpty) return;
                     final code = barcodes.first.rawValue;
@@ -548,9 +562,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [
-          BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 22, offset: const Offset(0, 10)),
-        ],
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 22, offset: const Offset(0, 10))],
         border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.18)),
       ),
       child: Padding(
@@ -590,6 +602,10 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
             _infoRow(Icons.school_outlined, 'الخدمة', student.courseLabel ?? '-'),
             const SizedBox(height: 8),
             _infoRow(Icons.qr_code_2, 'QR', student.barcodeValue ?? '-'),
+
+            // ✅ جديد: المبلغ المدفوع
+            const SizedBox(height: 10),
+            _infoRow(Icons.payments_outlined, 'المدفوع', '${student.paidAmount} ج'),
           ],
         ),
       ),
@@ -610,9 +626,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
         ),
-        boxShadow: [
-          BoxShadow(color: const Color(0xFF1A3C5E).withOpacity(0.25), blurRadius: 10, offset: const Offset(0, 4)),
-        ],
+        boxShadow: [BoxShadow(color: const Color(0xFF1A3C5E).withOpacity(0.25), blurRadius: 10, offset: const Offset(0, 4))],
       ),
       child: ClipOval(
         child: hasPhoto
