@@ -1,7 +1,9 @@
 // lib/main.dart
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'screens/home_screen.dart';
 
@@ -29,24 +31,31 @@ class ChurchAttendanceApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+
+    final baseTheme = ThemeData(
+      useMaterial3: true,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: const Color(0xFF1A3C5E),
+        brightness: Brightness.light,
+      ),
+      scaffoldBackgroundColor: const Color(0xFFF5F7FA),
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Color(0xFF1A3C5E),
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+    );
+
     return MaterialApp(
       title: 'حضور كنيسة',
       debugShowCheckedModeBanner: false,
       locale: const Locale('ar'),
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1A3C5E),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-        fontFamily: 'Cairo',
-        scaffoldBackgroundColor: const Color(0xFFF5F7FA),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF1A3C5E),
-          foregroundColor: Colors.white,
-          elevation: 0,
-        ),
+
+      // ✅ Cairo من Google Fonts على مستوى التطبيق
+      theme: baseTheme.copyWith(
+        textTheme: GoogleFonts.cairoTextTheme(baseTheme.textTheme),
       ),
+
       home: const HomeScreen(),
     );
   }

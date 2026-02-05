@@ -1,6 +1,7 @@
 // lib/screens/scan_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -30,12 +31,16 @@ class StudentUiModel {
   final String fullName;
   final String? churchName;
   final String? barcodeValue;
+  final String? photoUrl;
+  final String? courseLabel;
 
   StudentUiModel({
     required this.id,
     required this.fullName,
     this.churchName,
     this.barcodeValue,
+    this.photoUrl,
+    this.courseLabel,
   });
 }
 
@@ -43,27 +48,27 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   final supabase = Supabase.instance.client;
 
   StudentUiModel? _scannedStudent;
-
-  bool _isScanning = false;     // لواجهة النبض
   bool _showSuccess = false;
 
-  late AnimationController _pulseController;
-  late Animation<double> _pulseAnimation;
+  bool _isProcessingScan = false; // يمنع تداخل تسجيلين
+  bool _isCardVisible = false;    // ✅ Popup state
 
-  // ✅ كورسات
+  late final AnimationController _pulseController;
+  late final Animation<double> _pulseAnimation;
+
   List<CourseOfferingItem> _offerings = [];
   CourseOfferingItem? _selectedOffering;
 
-  // ✅ جلسة اليوم للكورس
   String? _sessionId;
   bool _openingSession = false;
 
-  // ✅ سكانر
   final MobileScannerController _scannerController = MobileScannerController(
     detectionSpeed: DetectionSpeed.noDuplicates,
+    returnImage: false,
   );
-  bool _cameraActive = false;
+
   DateTime? _lastScanAt;
+  String? _lastBarcode;
 
   @override
   void initState() {
@@ -71,10 +76,10 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
 
     _pulseController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    )..repeat();
+      duration: const Duration(milliseconds: 1400),
+    )..repeat(reverse: true);
 
-    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.08).animate(
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.05).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
@@ -86,6 +91,13 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     _pulseController.dispose();
     _scannerController.dispose();
     super.dispose();
+  }
+
+  Future<void> _hapticAndTick() async {
+    try {
+      await HapticFeedback.mediumImpact();
+      await SystemSound.play(SystemSoundType.click);
+    } catch (_) {}
   }
 
   Future<void> _loadOfferings() async {
@@ -104,6 +116,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
         );
       }).where((x) => x.courseTitle.isNotEmpty && x.yearName.isNotEmpty).toList();
 
+      if (!mounted) return;
       setState(() {
         _offerings = list;
         _selectedOffering = list.isNotEmpty ? list.first : null;
@@ -122,9 +135,11 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     setState(() {
       _openingSession = true;
       _sessionId = null;
-      _cameraActive = false;
       _scannedStudent = null;
       _showSuccess = false;
+      _isProcessingScan = false;
+      _isCardVisible = false;
+      _lastBarcode = null;
     });
 
     try {
@@ -134,106 +149,128 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
 
       final sessionId = result.toString();
 
+      if (!mounted) return;
       setState(() {
         _sessionId = sessionId;
-        _cameraActive = true; // ✅ افتح الكاميرا بعد فتح الجلسة
       });
 
-      _toast('تم فتح جلسة اليوم وتجهيز الغياب ✅');
+      // ✅ شغل الكاميرا
+      await _scannerController.start();
+
+      _toast('تم فتح جلسة اليوم ✅ تقدر تسكان دلوقتي');
     } catch (e) {
       _toast('خطأ في فتح الجلسة: $e');
     } finally {
-      setState(() => _openingSession = false);
+      if (mounted) setState(() => _openingSession = false);
     }
   }
 
-  Future<void> _handleBarcode(String code) async {
-    // فلتر منع التكرار السريع
-    final now = DateTime.now();
-    if (_lastScanAt != null && now.difference(_lastScanAt!) < const Duration(milliseconds: 1200)) {
-      return;
-    }
-    _lastScanAt = now;
+  Future<void> _dismissCardAndResume() async {
+    if (!mounted) return;
+    setState(() {
+      _isCardVisible = false;
+      _scannedStudent = null;
+      _showSuccess = false;
+    });
 
+    // ✅ رجّع السكان يشتغل
+    try {
+      await _scannerController.start();
+    } catch (_) {}
+
+    _isProcessingScan = false;
+  }
+
+  Future<void> _handleBarcode(String code) async {
     if (_sessionId == null) {
       _toast('لازم تضغط "فتح جلسة اليوم" الأول');
       return;
     }
 
+    // ✅ لو الكارت ظاهر، ممنوع أي سكان جديد لحد ما تقفله
+    if (_isCardVisible) return;
+
+    final now = DateTime.now();
+    if (_lastScanAt != null && now.difference(_lastScanAt!) < const Duration(milliseconds: 900)) {
+      return;
+    }
+    _lastScanAt = now;
+
+    if (_lastBarcode != null && _lastBarcode == code) {
+      return;
+    }
+
+    if (_isProcessingScan) return;
+    _isProcessingScan = true;
+
     setState(() {
-      _isScanning = true;
       _showSuccess = false;
-      _scannedStudent = null;
     });
 
     try {
-      // 1) سجل حضور في الكورس
+      // ✅ وقف الكاميرا عشان مانسكانش تاني قبل ما المستخدم يقفل الكارت
+      await _scannerController.stop();
+
+      // 1) هات بيانات الطالب الأول
+      final studentRes = await supabase
+          .from('students')
+          .select('id, full_name, barcode_value, photo_url, churches(name)')
+          .eq('barcode_value', code)
+          .maybeSingle();
+
+      if (studentRes == null) {
+        await _hapticAndTick();
+        _toast('الـ QR ده مش متسجل');
+
+        // ✅ رجّع الكاميرا تشتغل تاني فورًا
+        await _scannerController.start();
+        _isProcessingScan = false;
+        return;
+      }
+
+      // 2) سجل حضور
       await supabase.rpc('mark_present', params: {
         'p_session_id': _sessionId,
         'p_barcode': code,
       });
 
-      // 2) هات بيانات الطالب لعرضها
-      final studentRes = await supabase
-          .from('students')
-          .select('id, full_name, barcode_value, churches(name)')
-          .eq('barcode_value', code)
-          .maybeSingle();
-
-      if (studentRes == null) {
-        // حصل حضور لكن مش لقينا بيانات؟ (غريب) بس نتعامل
-        setState(() {
-          _isScanning = false;
-          _showSuccess = true;
-          _scannedStudent = StudentUiModel(
-            id: '',
-            fullName: 'تم التسجيل ✅',
-            churchName: null,
-            barcodeValue: code,
-          );
-        });
-        return;
-      }
+      await _hapticAndTick();
 
       final student = StudentUiModel(
         id: studentRes['id'] as String,
         fullName: (studentRes['full_name'] ?? '').toString(),
         barcodeValue: (studentRes['barcode_value'] ?? '').toString(),
+        photoUrl: (studentRes['photo_url'] ?? '').toString(),
         churchName: (studentRes['churches']?['name'] ?? '').toString(),
+        courseLabel: _selectedOffering?.label,
       );
 
+      _lastBarcode = code;
+
+      if (!mounted) return;
       setState(() {
-        _isScanning = false;
         _scannedStudent = student;
         _showSuccess = true;
+        _isCardVisible = true; // ✅ Pop overlay
       });
 
-      // يرجع يخفي النجاح بعد ثانيتين
-      Future.delayed(const Duration(seconds: 2), () {
-        if (!mounted) return;
-        setState(() {
-          _showSuccess = false;
-          _scannedStudent = null;
-          _isScanning = false;
-        });
-      });
+      // ملاحظة: مش هنقفل الكارت لوحده… انت قلت تقفله “لما ادوس عليه”
+      // فهنسيبه مفتوح لحد ما المستخدم يلمسه.
     } catch (e) {
-      setState(() => _isScanning = false);
       _toast('فشل تسجيل الحضور: $e');
+      _isProcessingScan = false;
+      try {
+        await _scannerController.start();
+      } catch (_) {}
     }
-  }
-
-  void _resetCard() {
-    setState(() {
-      _scannedStudent = null;
-      _showSuccess = false;
-      _isScanning = false;
-    });
   }
 
   void _toast(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
   }
 
   @override
@@ -241,30 +278,72 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     return Scaffold(
       backgroundColor: const Color(0xFFF5F7FA),
       body: SafeArea(
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.center,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final w = constraints.maxWidth;
+            final scanBox = w < 380 ? 240.0 : 270.0;
+
+            return Stack(
               children: [
-                const SizedBox(height: 12),
-                _buildHeader(),
-                const SizedBox(height: 18),
+                // ✅ الصفحة الأساسية
+                SingleChildScrollView(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        const SizedBox(height: 12),
+                        _buildHeader(),
+                        const SizedBox(height: 16),
+                        _buildCourseSelector(),
+                        const SizedBox(height: 12),
+                        _buildOpenSessionButton(),
+                        const SizedBox(height: 18),
+                        _buildScanArea(size: scanBox),
+                        const SizedBox(height: 120), // مساحة عشان الـ popup مايغطّيش آخر حاجة
+                      ],
+                    ),
+                  ),
+                ),
 
-                _buildCourseSelector(),
-                const SizedBox(height: 12),
+                // ✅ Overlay dim خلف الكارت
+                if (_isCardVisible)
+                  Positioned.fill(
+                    child: GestureDetector(
+                      onTap: _dismissCardAndResume, // لو دوست برا الكارت كمان يقفل
+                      child: Container(
+                        color: Colors.black.withOpacity(0.35),
+                      ),
+                    ),
+                  ),
 
-                _buildOpenSessionButton(),
-                const SizedBox(height: 18),
-
-                _buildScanArea(),
-                const SizedBox(height: 24),
-
-                if (_scannedStudent != null && !_showSuccess) _buildStudentCard(_scannedStudent!),
-                if (_showSuccess && _scannedStudent != null) _buildSuccessCard(_scannedStudent!),
+                // ✅ Pop Card فوق كل شيء (Z-index)
+                Positioned(
+                  left: 16,
+                  right: 16,
+                  bottom: 18,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 220),
+                    switchInCurve: Curves.easeOutBack,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, anim) {
+                      return ScaleTransition(
+                        scale: Tween<double>(begin: 0.92, end: 1.0).animate(anim),
+                        child: FadeTransition(opacity: anim, child: child),
+                      );
+                    },
+                    child: _isCardVisible && _scannedStudent != null
+                        ? GestureDetector(
+                      key: const ValueKey('student_card'),
+                      onTap: _dismissCardAndResume, // ✅ تقفل لما تدوس عليها
+                      child: _buildStudentCard(_scannedStudent!),
+                    )
+                        : const SizedBox.shrink(key: ValueKey('empty')),
+                  ),
+                ),
               ],
-            ),
-          ),
+            );
+          },
         ),
       ),
     );
@@ -285,13 +364,13 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
             borderRadius: BorderRadius.circular(16),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF1A3C5E).withOpacity(0.3),
+                color: const Color(0xFF1A3C5E).withOpacity(0.30),
                 blurRadius: 12,
                 offset: const Offset(0, 4),
               ),
             ],
           ),
-          child: const Icon(Icons.church_outlined, color: Colors.white, size: 28),
+          child: const Icon(Icons.school_outlined, color: Colors.white, size: 28),
         ),
         const SizedBox(height: 14),
         const Text(
@@ -313,35 +392,46 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(14),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 2))],
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 10, offset: const Offset(0, 2))
+        ],
       ),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Row(
           children: [
             const Expanded(
               child: Text(
                 'الكورس / السنة',
-                style: TextStyle(fontSize: 14, color: Color(0xFF1A3C5E), fontWeight: FontWeight.w600),
+                style: TextStyle(fontSize: 14, color: Color(0xFF1A3C5E), fontWeight: FontWeight.w700),
               ),
             ),
             DropdownButton<CourseOfferingItem>(
               value: _selectedOffering,
               underline: const SizedBox(),
               style: const TextStyle(fontSize: 13, color: Color(0xFF1A3C5E), fontFamily: 'Cairo'),
-              items: _offerings
-                  .map((o) => DropdownMenuItem<CourseOfferingItem>(
-                value: o,
-                child: Text(o.label, overflow: TextOverflow.ellipsis),
-              ))
-                  .toList(),
-              onChanged: (val) {
+              items: _offerings.map((o) {
+                return DropdownMenuItem<CourseOfferingItem>(
+                  value: o,
+                  child: SizedBox(
+                    width: 190,
+                    child: Text(o.label, overflow: TextOverflow.ellipsis),
+                  ),
+                );
+              }).toList(),
+              onChanged: (val) async {
                 setState(() {
                   _selectedOffering = val;
-                  _sessionId = null;       // ✅ تغيير الكورس = لازم تفتح جلسة جديدة
-                  _cameraActive = false;
-                  _resetCard();
+                  _sessionId = null;
+                  _isCardVisible = false;
+                  _scannedStudent = null;
+                  _showSuccess = false;
+                  _isProcessingScan = false;
+                  _lastBarcode = null;
                 });
+                try {
+                  await _scannerController.stop();
+                } catch (_) {}
               },
             ),
           ],
@@ -376,7 +466,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
             ] else ...[
               const Icon(Icons.play_circle_outline),
               const SizedBox(width: 10),
-              const Text('فتح جلسة اليوم'),
+              Text(_sessionId == null ? 'فتح جلسة اليوم' : 'جلسة اليوم شغالة'),
             ],
           ],
         ),
@@ -384,18 +474,20 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     );
   }
 
-  Widget _buildScanArea() {
+  Widget _buildScanArea({required double size}) {
+    final cameraActive = _sessionId != null;
+
     return AnimatedBuilder(
       animation: _pulseAnimation,
       builder: (context, child) {
         return Transform.scale(
-          scale: _isScanning ? _pulseAnimation.value : 1.0,
+          scale: _isProcessingScan ? _pulseAnimation.value : 1.0,
           child: child,
         );
       },
       child: Container(
-        width: 260,
-        height: 260,
+        width: size,
+        height: size,
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(28),
@@ -409,11 +501,13 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
           child: Stack(
             alignment: Alignment.center,
             children: [
-              if (_cameraActive)
+              if (cameraActive)
                 MobileScanner(
                   controller: _scannerController,
                   fit: BoxFit.cover,
                   onDetect: (capture) {
+                    if (!cameraActive) return;
+                    if (_isCardVisible) return; // ✅ لو الكارت ظاهر تجاهل أي Detect
                     final barcodes = capture.barcodes;
                     if (barcodes.isEmpty) return;
                     final code = barcodes.first.rawValue;
@@ -423,8 +517,6 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                 )
               else
                 _scanDisabledView(),
-
-              // Overlay بسيط
               IgnorePointer(
                 child: Container(
                   decoration: BoxDecoration(
@@ -444,183 +536,123 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Icon(
-          Icons.qr_code_scanner_outlined,
-          size: 72,
-          color: const Color(0xFF1A3C5E).withOpacity(0.45),
-        ),
+        Icon(Icons.qr_code_scanner_outlined, size: 72, color: const Color(0xFF1A3C5E).withOpacity(0.45)),
         const SizedBox(height: 10),
-        Text(
-          _sessionId == null ? 'اضغط "فتح جلسة اليوم" أولًا' : 'الكاميرا غير مفعلة',
-          style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-        ),
+        Text('اضغط "فتح جلسة اليوم" أولًا', style: TextStyle(fontSize: 13, color: Colors.grey.shade600)),
       ],
     );
   }
 
   Widget _buildStudentCard(StudentUiModel student) {
     return Container(
-      width: double.infinity,
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
-        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 16, offset: const Offset(0, 4))],
+        boxShadow: [
+          BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 22, offset: const Offset(0, 10)),
+        ],
+        border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.18)),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(20),
+        padding: const EdgeInsets.all(18),
         child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Container(
-              width: 90,
-              height: 90,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF1A3C5E), Color(0xFF2E6B9E)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                boxShadow: [BoxShadow(color: const Color(0xFF1A3C5E).withOpacity(0.3), blurRadius: 10, offset: const Offset(0, 4))],
-              ),
-              child: Center(
-                child: Text(
-                  student.fullName.isNotEmpty ? student.fullName[0] : '?',
-                  style: const TextStyle(fontSize: 36, color: Colors.white, fontWeight: FontWeight.bold),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              student.fullName,
-              style: const TextStyle(fontSize: 19, fontWeight: FontWeight.bold, color: Color(0xFF1A3C5E)),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 6),
-            if ((student.barcodeValue ?? '').isNotEmpty)
+            if (_showSuccess)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: const Color(0xFF1A3C5E).withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  student.barcodeValue!,
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF1A3C5E), fontWeight: FontWeight.w600, letterSpacing: 1.3),
-                ),
-              ),
-            const SizedBox(height: 18),
-
-            _infoRow(Icons.church_outlined, 'الكنيسة', student.churchName ?? '-'),
-            const SizedBox(height: 10),
-            _infoRow(Icons.access_time_outlined, 'الوقت', _formatTime(DateTime.now())),
-            const SizedBox(height: 16),
-
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: ElevatedButton(
-                onPressed: _resetCard,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF2E7D32),
-                  foregroundColor: Colors.white,
-                  elevation: 2,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  color: const Color(0xFF2E7D32).withOpacity(0.10),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.35)),
                 ),
                 child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(Icons.check_circle_outline, size: 22),
+                    Icon(Icons.check_circle, color: Color(0xFF2E7D32), size: 18),
                     SizedBox(width: 8),
-                    Text('تم - جاهز للي بعده', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                    Text('تم التسجيل - دوس هنا عشان تقفل',
+                        style: TextStyle(color: Color(0xFF2E7D32), fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
+            _avatar(student),
+            const SizedBox(height: 12),
+            Text(
+              student.fullName,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF1A3C5E)),
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
-            TextButton(
-              onPressed: _resetCard,
-              child: const Text('إلغاء', style: TextStyle(color: Colors.grey, fontSize: 14)),
-            ),
+            _infoRow(Icons.church_outlined, 'الكنيسة', student.churchName ?? '-'),
+            const SizedBox(height: 8),
+            _infoRow(Icons.school_outlined, 'الخدمة', student.courseLabel ?? '-'),
+            const SizedBox(height: 8),
+            _infoRow(Icons.qr_code_2, 'QR', student.barcodeValue ?? '-'),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _avatar(StudentUiModel s) {
+    final url = (s.photoUrl ?? '').trim();
+    final hasPhoto = url.isNotEmpty && (url.startsWith('http://') || url.startsWith('https://'));
+
+    return Container(
+      width: 86,
+      height: 86,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: const LinearGradient(
+          colors: [Color(0xFF1A3C5E), Color(0xFF2E6B9E)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        boxShadow: [
+          BoxShadow(color: const Color(0xFF1A3C5E).withOpacity(0.25), blurRadius: 10, offset: const Offset(0, 4)),
+        ],
+      ),
+      child: ClipOval(
+        child: hasPhoto
+            ? Image.network(url, fit: BoxFit.cover, errorBuilder: (_, __, ___) => _initialAvatar(s))
+            : _initialAvatar(s),
+      ),
+    );
+  }
+
+  Widget _initialAvatar(StudentUiModel s) {
+    return Center(
+      child: Text(
+        s.fullName.isNotEmpty ? s.fullName[0] : '?',
+        style: const TextStyle(fontSize: 34, color: Colors.white, fontWeight: FontWeight.bold),
       ),
     );
   }
 
   Widget _infoRow(IconData icon, String label, String value) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
         color: const Color(0xFFF5F7FA),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 18, color: const Color(0xFF1A3C5E)),
-              const SizedBox(width: 8),
-              Text(label, style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w500)),
-            ],
-          ),
+          Icon(icon, size: 18, color: const Color(0xFF1A3C5E)),
+          const SizedBox(width: 8),
+          Text(label, style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)),
+          const Spacer(),
           Flexible(
             child: Text(
               value,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13, color: Color(0xFF1A3C5E), fontWeight: FontWeight.w600),
+              style: const TextStyle(fontSize: 13, color: Color(0xFF1A3C5E), fontWeight: FontWeight.w700),
             ),
           ),
         ],
       ),
     );
-  }
-
-  Widget _buildSuccessCard(StudentUiModel student) {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(20),
-        boxShadow: [BoxShadow(color: const Color(0xFF2E7D32).withOpacity(0.15), blurRadius: 16, offset: const Offset(0, 4))],
-        border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.3), width: 2),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF2E7D32).withOpacity(0.1),
-              ),
-              child: const Center(
-                child: Icon(Icons.check_circle, size: 44, color: Color(0xFF2E7D32)),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'تم التسجيل بنجاح!',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Color(0xFF2E7D32)),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'تم تسجيل حضور ${student.fullName}',
-              style: const TextStyle(fontSize: 14, color: Colors.grey),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  String _formatTime(DateTime dt) {
-    final h = dt.hour > 12 ? dt.hour - 12 : dt.hour;
-    final m = dt.minute.toString().padLeft(2, '0');
-    final ampm = dt.hour >= 12 ? 'م' : 'ص';
-    return '$h:$m $ampm';
   }
 }

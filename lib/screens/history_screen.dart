@@ -1,6 +1,8 @@
 // lib/screens/history_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // ✅ Haptic + SystemSound
+import 'package:mobile_scanner/mobile_scanner.dart'; // ✅ QR Scan
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class HistoryScreen extends StatefulWidget {
@@ -39,6 +41,23 @@ class _HistoryScreenState extends State<HistoryScreen> {
     super.dispose();
   }
 
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg)),
+    );
+  }
+
+  Future<void> _hapticAndTick() async {
+    try {
+      await HapticFeedback.mediumImpact();
+      await SystemSound.play(SystemSoundType.click);
+    } catch (_) {
+      // ignore
+    }
+  }
+
   void _onSearchChanged() {
     final q = _searchController.text.trim();
 
@@ -71,10 +90,9 @@ class _HistoryScreenState extends State<HistoryScreen> {
     });
 
     try {
-      // بحث: full_name يحتوي OR barcode_value يساوي
       final res = await _supabase
           .from('students')
-          .select('id, full_name, barcode_value, churches(name)')
+          .select('id, full_name, barcode_value, photo_url, churches(name)')
           .or('full_name.ilike.%$query%,barcode_value.eq.$query')
           .limit(20);
 
@@ -90,9 +108,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
         _error = 'حصل خطأ في البحث: $e';
       });
     } finally {
-      if (mounted) {
-        setState(() => _isSearching = false);
-      }
+      if (mounted) setState(() => _isSearching = false);
     }
   }
 
@@ -108,8 +124,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
     try {
       final studentId = student['id'] as String;
 
-      // ✅ هنا بنسحب من session_attendance (المربوط بالجلسة)
-      // لو واجهت مشكلة في الـ join name، اقرأ الملاحظة أسفل الكود.
       final res = await _supabase
           .from('session_attendance')
           .select('id, status, scanned_at, notes, course_sessions(session_date, title)')
@@ -129,10 +143,150 @@ class _HistoryScreenState extends State<HistoryScreen> {
         _error = 'حصل خطأ في تحميل السجل: $e';
       });
     } finally {
-      if (mounted) {
-        setState(() => _isLoadingHistory = false);
-      }
+      if (mounted) setState(() => _isLoadingHistory = false);
     }
+  }
+
+  // ✅ سكان QR للبحث داخل صفحة السجل
+  void _openQrSearchScanner() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        final controller = MobileScannerController(
+          detectionSpeed: DetectionSpeed.noDuplicates,
+        );
+
+        bool gotResult = false;
+
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final h = MediaQuery.of(context).size.height;
+
+            return Container(
+              height: h * 0.65,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              child: Column(
+                children: [
+                  const SizedBox(height: 10),
+                  Container(
+                    width: 44,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'سكان QR للبحث',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF1A3C5E),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(18),
+                        child: Stack(
+                          children: [
+                            MobileScanner(
+                              controller: controller,
+                              fit: BoxFit.cover,
+                              onDetect: (capture) async {
+                                if (gotResult) return;
+
+                                final barcodes = capture.barcodes;
+                                if (barcodes.isEmpty) return;
+
+                                final code = barcodes.first.rawValue;
+                                if (code == null || code.trim().isEmpty) return;
+
+                                gotResult = true;
+                                final qr = code.trim();
+
+                                // ✅ تيك + هزاز
+                                await _hapticAndTick();
+
+                                // اقفل الشيت
+                                if (Navigator.of(context).canPop()) {
+                                  Navigator.of(context).pop();
+                                }
+
+                                // حط القيمة في البحث
+                                _searchController.text = qr;
+                                _searchController.selection = TextSelection.fromPosition(
+                                  TextPosition(offset: _searchController.text.length),
+                                );
+
+                                // نفّذ البحث فورًا
+                                await _searchStudents(qr);
+
+                                // ✅ لو ملقاش طالب
+                                if (_searchResults.isEmpty) {
+                                  _toast('الـ QR ده مش متسجل');
+                                  return;
+                                }
+
+                                // ✅ لو نتيجة واحدة: افتح السجل تلقائي
+                                if (_searchResults.length == 1) {
+                                  await _selectStudent(_searchResults.first);
+                                }
+                              },
+                            ),
+
+                            // Overlay إطار
+                            IgnorePointer(
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: Colors.white.withOpacity(0.75),
+                                    width: 2,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                    child: SizedBox(
+                      width: double.infinity,
+                      height: 46,
+                      child: ElevatedButton.icon(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close),
+                        label: const Text('إغلاق'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF1A3C5E),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   @override
@@ -230,20 +384,33 @@ class _HistoryScreenState extends State<HistoryScreen> {
           hintTextDirection: TextDirection.rtl,
           hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
           prefixIcon: const Icon(Icons.search, color: Colors.grey, size: 22),
-          suffixIcon: _searchController.text.isNotEmpty
-              ? IconButton(
-            icon: const Icon(Icons.close, color: Colors.grey, size: 20),
-            onPressed: () {
-              _searchController.clear();
-              setState(() {
-                _selectedStudent = null;
-                _searchResults = [];
-                _attendanceRows = [];
-                _error = null;
-              });
-            },
-          )
-              : null,
+
+          // ✅ زر سكان QR + زر مسح
+          suffixIcon: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                tooltip: 'سكان QR',
+                icon: const Icon(Icons.qr_code_scanner, color: Color(0xFF1A3C5E)),
+                onPressed: _openQrSearchScanner,
+              ),
+              if (_searchController.text.isNotEmpty)
+                IconButton(
+                  tooltip: 'مسح',
+                  icon: const Icon(Icons.close, color: Colors.grey, size: 20),
+                  onPressed: () {
+                    _searchController.clear();
+                    setState(() {
+                      _selectedStudent = null;
+                      _searchResults = [];
+                      _attendanceRows = [];
+                      _error = null;
+                    });
+                  },
+                ),
+            ],
+          ),
+
           border: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(vertical: 14),
         ),
@@ -278,7 +445,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
             final name = (s['full_name'] ?? '').toString();
             final barcode = (s['barcode_value'] ?? '').toString();
 
-            // الكنيسة من join churches(name)
             String churchName = '';
             final churches = s['churches'];
             if (churches is Map && churches['name'] != null) {
@@ -287,8 +453,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
             return ListTile(
               onTap: () => _selectStudent(s),
-              contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               leading: Container(
                 width: 42,
                 height: 42,
@@ -344,9 +509,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
 
     final total = _attendanceRows.length;
-    final present = _attendanceRows
-        .where((r) => (r['status'] ?? '').toString() == 'present')
-        .length;
+    final present = _attendanceRows.where((r) => (r['status'] ?? '').toString() == 'present').length;
     final percent = total == 0 ? 0 : ((present / total) * 100).round();
 
     return Column(
@@ -374,15 +537,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
         Expanded(
           child: total == 0
               ? const Center(
-            child: Text(
-              'مفيش سجل لحد دلوقتي',
-              style: TextStyle(color: Colors.grey),
-            ),
+            child: Text('مفيش سجل لحد دلوقتي', style: TextStyle(color: Colors.grey)),
           )
               : ListView.builder(
             itemCount: _attendanceRows.length,
-            itemBuilder: (_, index) =>
-                _buildRecordItem(_attendanceRows[index]),
+            itemBuilder: (_, index) => _buildRecordItem(_attendanceRows[index]),
           ),
         ),
       ],
@@ -508,7 +667,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
     final status = (row['status'] ?? 'absent').toString();
     final scannedAt = row['scanned_at'];
 
-    // session info
     String title = '';
     String dateStr = '';
 
@@ -516,7 +674,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     if (cs is Map) {
       title = (cs['title'] ?? '').toString();
       final d = (cs['session_date'] ?? '').toString();
-      if (d.isNotEmpty) dateStr = d; // YYYY-MM-DD
+      if (d.isNotEmpty) dateStr = d;
     }
 
     final isPresent = status == 'present';
@@ -570,7 +728,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
                 ),
               ),
               const SizedBox(width: 12),
-
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -621,8 +778,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   String _formatLine(String sessionDate, dynamic scannedAt) {
-    // sessionDate: YYYY-MM-DD
-    // scannedAt: timestamp
     if (sessionDate.isNotEmpty) {
       return 'تاريخ الجلسة: $sessionDate';
     }
@@ -659,7 +814,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           ),
           const SizedBox(height: 6),
           const Text(
-            'اكتب الاسم أو رقم الـ QR فوق',
+            'اكتب الاسم أو رقم الـ QR فوق أو استخدم زر السكان',
             style: TextStyle(fontSize: 13, color: Colors.grey),
             textAlign: TextAlign.center,
           ),
