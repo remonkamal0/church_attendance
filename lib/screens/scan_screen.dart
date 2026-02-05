@@ -17,10 +17,14 @@ class CourseOfferingItem {
   final String courseTitle;
   final String yearName;
 
+  // ✅ جديد: سعر الكورس
+  final num price;
+
   CourseOfferingItem({
     required this.id,
     required this.courseTitle,
     required this.yearName,
+    required this.price,
   });
 
   String get label => '$courseTitle • $yearName';
@@ -34,8 +38,11 @@ class StudentUiModel {
   final String? photoUrl;
   final String? courseLabel;
 
-  // ✅ جديد: المبلغ المدفوع
+  // ✅ جديد: بيانات الدفع
+  final num offeringPrice;
   final num paidAmount;
+  final num remainingAmount;
+  final String paymentStatus; // unpaid / paid / partial / waived
 
   StudentUiModel({
     required this.id,
@@ -44,7 +51,10 @@ class StudentUiModel {
     this.barcodeValue,
     this.photoUrl,
     this.courseLabel,
+    required this.offeringPrice,
     required this.paidAmount,
+    required this.remainingAmount,
+    required this.paymentStatus,
   });
 }
 
@@ -54,8 +64,8 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   StudentUiModel? _scannedStudent;
   bool _showSuccess = false;
 
-  bool _isProcessingScan = false; // يمنع تداخل تسجيلين
-  bool _isCardVisible = false;    // ✅ Popup state
+  bool _isProcessingScan = false;
+  bool _isCardVisible = false;
 
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
@@ -104,19 +114,26 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     } catch (_) {}
   }
 
+  // =========================
+  // تحميل الكورسات + السعر
+  // =========================
   Future<void> _loadOfferings() async {
     try {
       final res = await supabase
           .from('course_offerings')
-          .select('id, courses(title), years(name)')
+          .select('id, price, courses(title), years(name)')
           .eq('is_active', true)
           .order('created_at', ascending: false);
 
       final list = (res as List).map((row) {
+        final rawPrice = row['price'];
+        final price = (rawPrice is num) ? rawPrice : (num.tryParse(rawPrice.toString()) ?? 0);
+
         return CourseOfferingItem(
           id: row['id'] as String,
           courseTitle: (row['courses']?['title'] ?? '').toString(),
           yearName: (row['years']?['name'] ?? '').toString(),
+          price: price,
         );
       }).where((x) => x.courseTitle.isNotEmpty && x.yearName.isNotEmpty).toList();
 
@@ -158,9 +175,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
         _sessionId = sessionId;
       });
 
-      // ✅ شغل الكاميرا
       await _scannerController.start();
-
       _toast('تم فتح جلسة اليوم ✅ تقدر تسكان دلوقتي');
     } catch (e) {
       _toast('خطأ في فتح الجلسة: $e');
@@ -177,7 +192,6 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       _showSuccess = false;
     });
 
-    // ✅ رجّع السكان يشتغل
     try {
       await _scannerController.start();
     } catch (_) {}
@@ -185,27 +199,65 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     _isProcessingScan = false;
   }
 
-  // ✅ جديد: هات المبلغ المدفوع من enrollments
-  Future<num> _getPaidAmount({
+  // =========================
+  // ✅ هات بيانات الدفع من enrollments
+  // =========================
+  Future<({num paid, String status})> _getEnrollmentPayment({
     required String studentId,
     required String offeringId,
   }) async {
     try {
       final res = await supabase
           .from('enrollments')
-          .select('paid_amount')
+          .select('paid_amount, payment_status')
           .eq('student_id', studentId)
           .eq('course_offering_id', offeringId)
           .maybeSingle();
 
-      if (res == null) return 0;
+      if (res == null) {
+        return (paid: 0, status: 'unpaid');
+      }
 
-      final v = res['paid_amount'];
-      if (v is num) return v;
-      return num.tryParse(v.toString()) ?? 0;
+      final rawPaid = res['paid_amount'];
+      final paid = (rawPaid is num) ? rawPaid : (num.tryParse(rawPaid.toString()) ?? 0);
+
+      final status = (res['payment_status'] ?? 'unpaid').toString();
+      return (paid: paid, status: status);
     } catch (_) {
-      return 0;
+      return (paid: 0, status: 'unpaid');
     }
+  }
+
+  String _statusLabel(String status) {
+    switch (status) {
+      case 'paid':
+        return 'مدفوع';
+      case 'partial':
+        return 'دفع جزئي';
+      case 'waived':
+        return 'معفي';
+      default:
+        return 'غير مدفوع';
+    }
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'paid':
+        return const Color(0xFF2E7D32);
+      case 'partial':
+        return const Color(0xFFEF6C00);
+      case 'waived':
+        return const Color(0xFF1565C0);
+      default:
+        return const Color(0xFFC62828);
+    }
+  }
+
+  String _money(num v) {
+    // شكل بسيط بدون intl
+    if (v == v.roundToDouble()) return v.toInt().toString();
+    return v.toStringAsFixed(2);
   }
 
   Future<void> _handleBarcode(String code) async {
@@ -243,12 +295,12 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       if (studentRes == null) {
         await _hapticAndTick();
         _toast('الـ QR ده مش متسجل');
+
         await _scannerController.start();
         _isProcessingScan = false;
         return;
       }
 
-      // ✅ سجل حضور
       await supabase.rpc('mark_present', params: {
         'p_session_id': _sessionId,
         'p_barcode': code,
@@ -257,12 +309,15 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       await _hapticAndTick();
 
       final studentId = studentRes['id'] as String;
+      final offeringId = _selectedOffering!.id;
+      final offeringPrice = _selectedOffering!.price;
 
-      // ✅ هات المدفوع
-      final paidAmount = await _getPaidAmount(
-        studentId: studentId,
-        offeringId: _selectedOffering!.id,
-      );
+      // ✅ دفع الطالب في الكورس ده
+      final pay = await _getEnrollmentPayment(studentId: studentId, offeringId: offeringId);
+      final paid = pay.paid;
+      final status = pay.status;
+
+      final remaining = (offeringPrice - paid) < 0 ? 0 : (offeringPrice - paid);
 
       final student = StudentUiModel(
         id: studentId,
@@ -271,7 +326,10 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
         photoUrl: (studentRes['photo_url'] ?? '').toString(),
         churchName: (studentRes['churches']?['name'] ?? '').toString(),
         courseLabel: _selectedOffering?.label,
-        paidAmount: paidAmount,
+        offeringPrice: offeringPrice,
+        paidAmount: paid,
+        remainingAmount: remaining,
+        paymentStatus: status,
       );
 
       _lastBarcode = code;
@@ -432,7 +490,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
               items: _offerings.map((o) {
                 return DropdownMenuItem<CourseOfferingItem>(
                   value: o,
-                  child: SizedBox(width: 190, child: Text(o.label, overflow: TextOverflow.ellipsis)),
+                  child: SizedBox(width: 190, child: Text('${o.label} • ${_money(o.price)} ج', overflow: TextOverflow.ellipsis)),
                 );
               }).toList(),
               onChanged: (val) async {
@@ -558,12 +616,15 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
   }
 
   Widget _buildStudentCard(StudentUiModel student) {
+    final statusColor = _statusColor(student.paymentStatus);
+    final statusText = _statusLabel(student.paymentStatus);
+
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(20),
         boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 22, offset: const Offset(0, 10))],
-        border: Border.all(color: const Color(0xFF2E7D32).withOpacity(0.18)),
+        border: Border.all(color: statusColor.withOpacity(0.18)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(18),
@@ -589,23 +650,50 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
                   ],
                 ),
               ),
+
             _avatar(student),
             const SizedBox(height: 12),
+
             Text(
               student.fullName,
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF1A3C5E)),
               textAlign: TextAlign.center,
             ),
-            const SizedBox(height: 8),
+
+            const SizedBox(height: 10),
             _infoRow(Icons.church_outlined, 'الكنيسة', student.churchName ?? '-'),
             const SizedBox(height: 8),
             _infoRow(Icons.school_outlined, 'الخدمة', student.courseLabel ?? '-'),
             const SizedBox(height: 8),
             _infoRow(Icons.qr_code_2, 'QR', student.barcodeValue ?? '-'),
 
-            // ✅ جديد: المبلغ المدفوع
+            // ✅ الدفع
+            const SizedBox(height: 12),
+            _infoRow(Icons.local_offer_outlined, 'سعر الكورس', '${_money(student.offeringPrice)} ج'),
+            const SizedBox(height: 8),
+            _infoRow(Icons.payments_outlined, 'المدفوع', '${_money(student.paidAmount)} ج'),
+            const SizedBox(height: 8),
+            _infoRow(Icons.account_balance_wallet_outlined, 'الباقي', '${_money(student.remainingAmount)} ج'),
             const SizedBox(height: 10),
-            _infoRow(Icons.payments_outlined, 'المدفوع', '${student.paidAmount} ج'),
+
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: statusColor.withOpacity(0.10),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: statusColor.withOpacity(0.25)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.verified_outlined, size: 18, color: statusColor),
+                  const SizedBox(width: 8),
+                  const Text('حالة الدفع', style: TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  Text(statusText, style: TextStyle(fontSize: 13, color: statusColor, fontWeight: FontWeight.w800)),
+                ],
+              ),
+            ),
           ],
         ),
       ),
