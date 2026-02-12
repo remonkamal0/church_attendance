@@ -1,4 +1,3 @@
-// lib/screens/course_dashboard_screen.dart
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -34,7 +33,6 @@ class _CourseDashboardScreenState extends State<CourseDashboardScreen> {
     });
 
     try {
-      // هنعرض اسم الكورس + السنة (لو عايز)
       final res = await _supabase
           .from('course_offerings')
           .select('id, courses(title), years(name)')

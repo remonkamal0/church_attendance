@@ -1,8 +1,7 @@
-// lib/screens/history_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // ✅ Haptic + SystemSound
-import 'package:mobile_scanner/mobile_scanner.dart'; // ✅ QR Scan
+import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class HistoryScreen extends StatefulWidget {
@@ -147,7 +146,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
     }
   }
 
-  // ✅ سكان QR للبحث داخل صفحة السجل
   void _openQrSearchScanner() {
     showModalBottomSheet(
       context: context,
@@ -214,37 +212,30 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                 gotResult = true;
                                 final qr = code.trim();
 
-                                // ✅ تيك + هزاز
                                 await _hapticAndTick();
 
-                                // اقفل الشيت
                                 if (Navigator.of(context).canPop()) {
                                   Navigator.of(context).pop();
                                 }
 
-                                // حط القيمة في البحث
                                 _searchController.text = qr;
                                 _searchController.selection = TextSelection.fromPosition(
                                   TextPosition(offset: _searchController.text.length),
                                 );
 
-                                // نفّذ البحث فورًا
                                 await _searchStudents(qr);
 
-                                // ✅ لو ملقاش طالب
                                 if (_searchResults.isEmpty) {
                                   _toast('الـ QR ده مش متسجل');
                                   return;
                                 }
 
-                                // ✅ لو نتيجة واحدة: افتح السجل تلقائي
                                 if (_searchResults.length == 1) {
                                   await _selectStudent(_searchResults.first);
                                 }
                               },
                             ),
 
-                            // Overlay إطار
                             IgnorePointer(
                               child: Container(
                                 decoration: BoxDecoration(
@@ -385,7 +376,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
           hintStyle: TextStyle(color: Colors.grey.shade400, fontSize: 14),
           prefixIcon: const Icon(Icons.search, color: Colors.grey, size: 22),
 
-          // ✅ زر سكان QR + زر مسح
           suffixIcon: Row(
             mainAxisSize: MainAxisSize.min,
             children: [

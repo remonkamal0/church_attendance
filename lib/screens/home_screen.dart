@@ -1,9 +1,7 @@
-// lib/screens/home_screen.dart
-
 import 'package:flutter/material.dart';
 import 'scan_screen.dart';
 import 'history_screen.dart';
-import 'course_dashboard_screen.dart'; // ✅ الصفحة الجديدة
+import 'course_dashboard_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -47,7 +45,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: const [
           ScanScreen(),
           HistoryScreen(),
-          CourseDashboardScreen(), // ✅ داشبورد الكورس
+          CourseDashboardScreen(),
         ],
       ),
       bottomNavigationBar: _buildBottomNav(),

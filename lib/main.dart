@@ -1,11 +1,11 @@
-// lib/main.dart
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:provider/provider.dart';
 
-import 'screens/home_screen.dart';
+import 'core/di/dependency_injection.dart';
+import 'presentation/screens/home_screen.dart';
 
 const supabaseUrl = 'https://xwcyduzlchmvckvuyixi.supabase.co';
 const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inh3Y3lkdXpsY2htdmNrdnV5aXhpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzAyODIzOTQsImV4cCI6MjA4NTg1ODM5NH0.LmUhoGj38EVqVYbjj32vHsHZnM37mAyPpDlnyr56o_k';
@@ -17,6 +17,9 @@ Future<void> main() async {
     url: supabaseUrl,
     anonKey: supabaseAnonKey,
   );
+
+  // Initialize dependency injection
+  DependencyInjection().initialize();
 
   SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
@@ -46,17 +49,26 @@ class ChurchAttendanceApp extends StatelessWidget {
       ),
     );
 
-    return MaterialApp(
-      title: 'حضور كنيسة',
-      debugShowCheckedModeBanner: false,
-      locale: const Locale('ar'),
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(
+          create: (_) => DependencyInjection().createScanProvider(),
+        ),
+        ChangeNotifierProvider(
+          create: (_) => DependencyInjection().createHistoryProvider(),
+        ),
+      ],
+      child: MaterialApp(
+        title: 'حضور كنيسة',
+        debugShowCheckedModeBanner: false,
+        locale: const Locale('ar'),
 
-      // ✅ Cairo من Google Fonts على مستوى التطبيق
-      theme: baseTheme.copyWith(
-        textTheme: GoogleFonts.cairoTextTheme(baseTheme.textTheme),
+        theme: baseTheme.copyWith(
+          textTheme: GoogleFonts.cairoTextTheme(baseTheme.textTheme),
+        ),
+
+        home: const HomeScreen(),
       ),
-
-      home: const HomeScreen(),
     );
   }
 }

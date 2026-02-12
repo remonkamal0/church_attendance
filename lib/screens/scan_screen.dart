@@ -1,4 +1,3 @@
-// lib/screens/scan_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -17,7 +16,6 @@ class CourseOfferingItem {
   final String courseTitle;
   final String yearName;
 
-  // ✅ جديد: سعر الكورس
   final num price;
 
   CourseOfferingItem({
@@ -38,11 +36,10 @@ class StudentUiModel {
   final String? photoUrl;
   final String? courseLabel;
 
-  // ✅ جديد: بيانات الدفع
   final num offeringPrice;
   final num paidAmount;
   final num remainingAmount;
-  final String paymentStatus; // unpaid / paid / partial / waived
+  final String paymentStatus;
 
   StudentUiModel({
     required this.id,
@@ -114,9 +111,6 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     } catch (_) {}
   }
 
-  // =========================
-  // تحميل الكورسات + السعر
-  // =========================
   Future<void> _loadOfferings() async {
     try {
       final res = await supabase
@@ -199,9 +193,6 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
     _isProcessingScan = false;
   }
 
-  // =========================
-  // ✅ هات بيانات الدفع من enrollments
-  // =========================
   Future<({num paid, String status})> _getEnrollmentPayment({
     required String studentId,
     required String offeringId,
@@ -312,7 +303,6 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
       final offeringId = _selectedOffering!.id;
       final offeringPrice = _selectedOffering!.price;
 
-      // ✅ دفع الطالب في الكورس ده
       final pay = await _getEnrollmentPayment(studentId: studentId, offeringId: offeringId);
       final paid = pay.paid;
       final status = pay.status;
@@ -667,8 +657,7 @@ class _ScanScreenState extends State<ScanScreen> with SingleTickerProviderStateM
             const SizedBox(height: 8),
             _infoRow(Icons.qr_code_2, 'QR', student.barcodeValue ?? '-'),
 
-            // ✅ الدفع
-            const SizedBox(height: 12),
+            const SizedBox(height: 8),
             _infoRow(Icons.local_offer_outlined, 'سعر الكورس', '${_money(student.offeringPrice)} ج'),
             const SizedBox(height: 8),
             _infoRow(Icons.payments_outlined, 'المدفوع', '${_money(student.paidAmount)} ج'),
